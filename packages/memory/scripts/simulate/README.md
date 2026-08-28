@@ -25,12 +25,12 @@ pnpm simulate:extract \
 
 Flags:
 
-| Flag               | Meaning                                                        |
-| ------------------ | -------------------------------------------------------------- |
-| `--source <url>`   | Required. Opened read-only; never written.                     |
-| `--target <url>`   | Required. Must be a localhost Postgres.                        |
-| `--threads <n>`    | Most-recent N threads that carry at least one OM record.       |
-| `--thread-id <id>` | Repeatable. Explicit ids. Mutually exclusive with `--threads`. |
+| Flag               | Meaning                                                          |
+| ------------------ | ---------------------------------------------------------------- |
+| `--source <url>`   | Required. Opened read-only; never written.                       |
+| `--target <url>`   | Required. Must use a literal loopback IP (`127.0.0.1` or `::1`). |
+| `--threads <n>`    | Most-recent N threads that carry at least one OM record.         |
+| `--thread-id <id>` | Repeatable. Explicit ids. Mutually exclusive with `--threads`.   |
 
 The final lines are machine-greppable: `EXTRACTED_THREADS=`, `EXTRACTED_MESSAGES=`,
 `EXTRACTED_OM_RECORDS=`.
@@ -119,8 +119,10 @@ not replace the built-in contract, which the pipeline depends on.
 
 - The source session is set to `TRANSACTION READ ONLY` before any query runs, so a write
   attempt fails loudly rather than succeeding quietly.
-- The target host must be `127.0.0.1`, `localhost`, or `[::1]`. Anything else exits
-  non-zero. A hostname that merely _contains_ "localhost" is rejected.
+- The target host must be the literal loopback address `127.0.0.1`, `::1`, or `[::1]`.
+  Hostnames, including `localhost`, are rejected so DNS cannot redirect writes.
+- Extraction compares the connected server address, port, and database name for the source
+  and target and refuses to continue when they resolve to the same database.
 - **Write-back to the source is out of scope.** This tooling never writes to a remote
   database.
 
