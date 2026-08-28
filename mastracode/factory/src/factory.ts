@@ -37,6 +37,7 @@ import {
   getFactoryAuthUserFromContext,
   getFactoryAuthUserId,
 } from './auth.js';
+import { FactoryCurationService } from './curation/service.js';
 import type { FactoryIntegration, IntegrationPostToolContext, IntegrationTools } from './integrations/base.js';
 import type { GithubIntegration } from './integrations/github/integration.js';
 import {
@@ -324,6 +325,7 @@ export class MastraFactory {
   #prepared: Awaited<ReturnType<typeof prepareAgentControllerMount>> | undefined;
   #dispatcher: FactoryDecisionDispatcher | undefined;
   #factoryProcessor: FactoryPhaseStateProcessor | undefined;
+  #curationService: FactoryCurationService | undefined;
   #preparing = false;
 
   constructor(config: MastraFactoryConfig) {
@@ -614,6 +616,13 @@ export class MastraFactory {
           rules,
           storage: workItemsStorage,
           ...(onTerminalStage ? { onTerminalStage } : {}),
+          onStageTransition: ({ orgId, factoryProjectId, workItemId, stage }) =>
+            this.#curationService?.curateWorkItem({
+              orgId,
+              factoryProjectId,
+              workItemId,
+              prompt: `Factory card moved to the ${stage} column. Curate durable knowledge from this work now.`,
+            }),
         })
       : undefined;
     const projectRoutes = new ProjectRoutes({
@@ -951,6 +960,13 @@ export class MastraFactory {
 
     this.#prepared = prepared;
     this.#factoryProcessor = factoryProcessor;
+    if (workItemsReady) {
+      this.#curationService = new FactoryCurationService({
+        agent: prepared.base.codeAgent,
+        controller: prepared.base.controller,
+        storage: workItemsStorage,
+      });
+    }
 
     // Chat-platform channels (Slack, Discord, …) contributed by integrations,
     // attached to the mounted controller so inbound platform messages reach
@@ -1028,6 +1044,7 @@ export class MastraFactory {
           ),
         ),
       );
+    const workers = [...integrationWorkers, ...(this.#curationService ? [this.#curationService] : [])];
 
     return {
       ...prepared.mastraArgs,
@@ -1035,7 +1052,7 @@ export class MastraFactory {
       // deployed factories must authenticate BOTH plain API callers and Studio
       // requests (`x-mastra-client-type: studio` routes to `studio.auth`).
       ...(auth ? { studio: { auth } } : {}),
-      ...(integrationWorkers.length > 0 ? { workers: integrationWorkers } : {}),
+      ...(workers.length > 0 ? { workers } : {}),
     };
   }
 
