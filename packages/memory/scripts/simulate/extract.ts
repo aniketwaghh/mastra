@@ -199,6 +199,25 @@ async function copyTable(
   return rows.length;
 }
 
+export async function copyTablesAtomically(
+  source: PgClient,
+  target: PgClient,
+  threadIds: string[],
+): Promise<Record<string, number>> {
+  await target.query('BEGIN');
+  try {
+    const counts: Record<string, number> = {};
+    for (const spec of COPIED_TABLES) {
+      counts[spec.table] = await copyTable(source, target, spec, threadIds);
+    }
+    await target.query('COMMIT');
+    return counts;
+  } catch (error) {
+    await target.query('ROLLBACK');
+    throw error;
+  }
+}
+
 export async function main(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
   assertLocalTarget(args.target);
@@ -223,10 +242,7 @@ export async function main(argv: string[]): Promise<void> {
     const threadIds = (await source.query(selection.sql, selection.params)).rows.map(r => r.id as string);
     if (threadIds.length === 0) throw new Error('no threads matched the selection');
 
-    const counts: Record<string, number> = {};
-    for (const spec of COPIED_TABLES) {
-      counts[spec.table] = await copyTable(source, target, spec, threadIds);
-    }
+    const counts = await copyTablesAtomically(source, target, threadIds);
 
     const perThread = (
       await target.query(

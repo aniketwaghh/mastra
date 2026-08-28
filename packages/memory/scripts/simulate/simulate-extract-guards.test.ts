@@ -4,6 +4,7 @@ import {
   assertDistinctDatabases,
   assertLocalTarget,
   buildThreadSelection,
+  copyTablesAtomically,
   isLocalPostgresUrl,
   parseArgs,
 } from './extract';
@@ -50,6 +51,34 @@ describe('simulate extract — source/target isolation', () => {
     const source = client({ database: 'production', address: '10.0.0.5', port: 5432 });
     const target = client({ database: 'simulate', address: '127.0.0.1', port: 55432 });
     await expect(assertDistinctDatabases(source, target)).resolves.toBeUndefined();
+  });
+
+  it('rolls back every target-table replacement when extraction fails', async () => {
+    const targetQueries: string[] = [];
+    const source = {
+      connect: async () => {},
+      end: async () => {},
+      query: async (text: string) => {
+        if (text.includes('information_schema.columns')) {
+          return { rows: [{ column_name: 'id', data_type: 'text' }] };
+        }
+        return { rows: [{ id: 'thread-1' }] };
+      },
+    };
+    const target = {
+      connect: async () => {},
+      end: async () => {},
+      query: async (text: string) => {
+        targetQueries.push(text);
+        if (text.includes('CREATE TABLE "mastra_messages"')) throw new Error('disk full');
+        return { rows: [] };
+      },
+    };
+
+    await expect(copyTablesAtomically(source, target, ['thread-1'])).rejects.toThrow('disk full');
+    expect(targetQueries[0]).toBe('BEGIN');
+    expect(targetQueries.at(-1)).toBe('ROLLBACK');
+    expect(targetQueries).not.toContain('COMMIT');
   });
 });
 
