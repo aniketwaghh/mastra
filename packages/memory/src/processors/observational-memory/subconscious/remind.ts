@@ -449,7 +449,7 @@ export function createReplyToolProcessor(
       if (correlations.size === 0) return undefined;
       return {
         tools: {
-          ...args.tools,
+          ...withReminderActivity(args.tools as Record<string, ToolAction<any, any, any>>, registry, correlations),
           reply_to_memory_question: createReplyTool(registry, capabilities, conversation, correlations),
         },
       };
@@ -460,7 +460,7 @@ export function createReplyToolProcessor(
 function withReminderActivity(
   tools: Record<string, ToolAction<any, any, any>>,
   registry: RemindRequestRegistry,
-  conversation: RemindConversation,
+  correlationIds: ReadonlySet<string>,
 ): Record<string, ToolAction<any, any, any>> {
   return Object.fromEntries(
     Object.entries(tools).map(([name, tool]) => {
@@ -471,7 +471,6 @@ function withReminderActivity(
         {
           ...tool,
           execute: async (...args: Parameters<NonNullable<typeof execute>>) => {
-            const correlationIds = registry.openCorrelationIds(conversation);
             for (const correlationId of correlationIds) {
               registry.recordActivity(correlationId, { toolName: name, action: 'execute', status: 'started' });
             }
@@ -511,7 +510,7 @@ function createReminderAgent(args: {
     instructions: args.instructions,
     model: args.model,
     ...(args.remindMemory ? { memory: args.remindMemory } : {}),
-    tools: withReminderActivity(createKnowledgeTools(args.memory, args.scope), args.registry, args.conversation),
+    tools: createKnowledgeTools(args.memory, args.scope),
     inputProcessors: [
       createReplyToolProcessor(args.registry, args.conversation, args.replyCapabilities),
       new ReminderResearchBudgetProcessor(args.registry, args.conversation),
