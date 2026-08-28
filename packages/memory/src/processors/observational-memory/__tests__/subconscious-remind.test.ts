@@ -420,6 +420,7 @@ describe('Subconscious remind', () => {
     async function runWithGenerateSpy(options: {
       createRemindMemory?: () => any;
       threadId?: string;
+      resourceId?: string | null;
       response?: string;
     }) {
       const { Agent } = await import('@mastra/core/agent');
@@ -440,6 +441,12 @@ describe('Subconscious remind', () => {
         });
         const context = createContext('unused');
         if (options.threadId) context.threadId = options.threadId;
+        if (options.resourceId === null) {
+          context.resourceId = undefined as any;
+          context.requestContext.set('knowledgeResourceId', 'user-42');
+        } else if (options.resourceId) {
+          context.resourceId = options.resourceId;
+        }
         await seedRelevantItem(context);
 
         const result = await applyExtractorHooks({
@@ -471,6 +478,16 @@ describe('Subconscious remind', () => {
         threadId: 'subconscious:alpha:remind',
         resourceId: 'user-42',
       });
+    });
+
+    it('runs stateless when the observation path lacks the session resource owner', async () => {
+      const createRemindMemory = vi.fn(() => ({ id: 'remind-memory' }) as any);
+      const { result, calls } = await runWithGenerateSpy({ createRemindMemory, resourceId: null });
+
+      expect(result.failures).toBeUndefined();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.[1]).not.toHaveProperty('memory');
+      expect(createRemindMemory).not.toHaveBeenCalled();
     });
 
     it('keys the thread off the parent thread id, never off the agent id', async () => {
