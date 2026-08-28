@@ -622,6 +622,7 @@ export class MastraFactory {
               factoryProjectId,
               workItemId,
               prompt: `Factory card moved to the ${stage} column. Curate durable knowledge from this work now.`,
+              includeRevoked: stage === 'done' || stage === 'canceled',
             }),
         })
       : undefined;
