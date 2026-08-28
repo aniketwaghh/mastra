@@ -97,6 +97,7 @@ import { SourceControlStorage } from './storage/domains/source-control/base.js';
 import { WorkItemsStorage } from './storage/domains/work-items/base.js';
 import { timedPhase } from './timing.js';
 import { createWorkspaceFactory, FactoryWorkspaceRegistry } from './workspace.js';
+import type { FactoryEagerSandboxStart } from './workspace.js';
 
 type BuildApiRoutesDeps = Pick<FactoryApiRoutesDeps, 'controller' | 'authStorage'>;
 
@@ -157,6 +158,19 @@ export interface MastraFactoryConfig {
   allowedOrigins?: string[];
   /** Sandbox configuration. Omitted → repository sandboxes are disabled. */
   sandbox?: MastraFactorySandboxConfig;
+  /**
+   * Opt-in sandbox prefetch policy, evaluated when a session's sandbox is
+   * first constructed (first workspace resolution). Return `true` to
+   * fire-and-forget `start()` so VM boot + repo setup race the model's own
+   * latency instead of stalling the agent's first command. The context tells
+   * the predicate what kind of session is asking (`getRunRole()`), so a host
+   * can boot eagerly for board-run executors while chat sessions stay lazy:
+   *
+   *   eagerSandboxStart: async ctx => (await ctx.getRunRole()) === 'work'
+   *
+   * Omitted → sandboxes start lazily on the first command (the default).
+   */
+  eagerSandboxStart?: FactoryEagerSandboxStart;
   /** Background Factory dispatcher configuration. */
   dispatcher?: MastraFactoryDispatcherConfig;
   /**
@@ -199,6 +213,7 @@ export interface MastraFactoryConfig {
 }
 
 export type { MastraFactorySandboxConfig } from './sandbox/session-sandbox.js';
+export type { FactoryEagerSandboxStart, FactoryEagerSandboxStartContext } from './workspace.js';
 
 /**
  * Per-process cap on concurrent background Factory dispatches. Omitted means
@@ -635,6 +650,7 @@ export class MastraFactory {
         controllerId: CONTROLLER_ID,
         workspace: createWorkspaceFactory({
           ...(sandboxConfig ? { sandbox: sandboxConfig } : {}),
+          ...(this.#config.eagerSandboxStart ? { eagerSandboxStart: this.#config.eagerSandboxStart } : {}),
           ...(githubIntegration ? { github: githubIntegration } : {}),
           ...(workItemsStorage ? { workItems: workItemsStorage } : {}),
           workspaceRegistry,

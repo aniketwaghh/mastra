@@ -176,9 +176,37 @@ const factorySkillExtension: WorkspaceSkillExtension = {
 
 type DynamicWorkspaceContext = Parameters<typeof getDynamicWorkspace>[0];
 
+/** Context passed to {@link CreateWorkspaceFactoryOptions.eagerSandboxStart}. */
+export interface FactoryEagerSandboxStartContext {
+  /** Persisted Factory session id the sandbox belongs to. */
+  sessionId: string;
+  /** `owner/repo` slug of the session's connected repository. */
+  repoFullName: string;
+  /**
+   * Role of the active board-run binding driving this session (`'plan'`,
+   * `'work'`, `'review'`, ...), or `null` when the session is not executing a
+   * board run — a plain chat session. Lazy storage lookup: the cost is only
+   * paid when the predicate calls it.
+   */
+  getRunRole: () => Promise<string | null>;
+}
+
+/**
+ * Opt-in sandbox prefetch policy. Evaluated once per constructed session
+ * sandbox (the first workspace resolution in a process); returning `true`
+ * fire-and-forgets `sandbox.start()`, racing VM boot + repo setup against the
+ * model's own latency instead of paying both serially on the agent's first
+ * command. Concurrent lazy starts coalesce on the provider's single-flighted
+ * `start()`. Errors are logged and swallowed — a failed eager start leaves
+ * the normal lazy-start path intact.
+ */
+export type FactoryEagerSandboxStart = (context: FactoryEagerSandboxStartContext) => boolean | Promise<boolean>;
+
 export interface CreateWorkspaceFactoryOptions {
   /** Factory sandbox runtime config (session sandbox callback). */
   sandbox?: MastraFactorySandboxConfig;
+  /** See {@link FactoryEagerSandboxStart}. Omitted → sandboxes start lazily on first command. */
+  eagerSandboxStart?: FactoryEagerSandboxStart;
   /** GitHub integration used to resolve Factory sessions and mint repo tokens. */
   github?: GithubIntegration;
   /** Work-items storage used to resolve the session's run-binding role, so
@@ -228,7 +256,7 @@ export class FactoryWorkspaceRegistry {
 }
 
 export function createWorkspaceFactory(options: CreateWorkspaceFactoryOptions = {}) {
-  const { sandbox: sandboxConfig, github, workItems } = options;
+  const { sandbox: sandboxConfig, github, workItems, eagerSandboxStart } = options;
   const workspaceRegistry = options.workspaceRegistry ?? new FactoryWorkspaceRegistry();
   type GithubTokenRegistration = {
     inject: (token: string) => void;
@@ -386,6 +414,31 @@ export function createWorkspaceFactory(options: CreateWorkspaceFactoryOptions = 
           await setupHook(args);
           await previous?.(args);
         });
+        // Opt-in prefetch, fired from the same attach-once closure so it runs
+        // exactly once per constructed instance — later resolutions are memo
+        // hits and must not re-evaluate the policy. Fire-and-forget: the
+        // resolving request never waits on (or fails because of) a VM boot,
+        // and a rejected eager start leaves the lazy first-command path to
+        // start (or surface the failure) through the normal route.
+        if (eagerSandboxStart) {
+          const eagerContext: FactoryEagerSandboxStartContext = {
+            sessionId: session.id,
+            repoFullName,
+            getRunRole: async () => {
+              if (!workItems) return null;
+              const address = getFactorySessionAddress(requestContext);
+              const binding = address ? await workItems.findRunBindingBySession(address) : null;
+              return binding?.status === 'active' ? binding.role : null;
+            },
+          };
+          void Promise.resolve()
+            .then(async () => {
+              if (await eagerSandboxStart(eagerContext)) await sandbox.start();
+            })
+            .catch(error => {
+              console.warn(`[factory] Eager sandbox start for session ${session.id} failed:`, error);
+            });
+        }
         return sandbox;
       });
     const sessionEntry = constructSessionEntry();

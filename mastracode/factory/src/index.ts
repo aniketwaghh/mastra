@@ -1,5 +1,11 @@
 export { MastraFactory } from './factory.js';
-export type { MastraArgs, MastraFactoryConfig, MastraFactorySandboxConfig } from './factory.js';
+export type {
+  MastraArgs,
+  MastraFactoryConfig,
+  MastraFactorySandboxConfig,
+  FactoryEagerSandboxStart,
+  FactoryEagerSandboxStartContext,
+} from './factory.js';
 export type { FactorySandboxContext, SessionSetupRun } from './sandbox/session-sandbox.js';
 export { ChannelIdentityStorage } from './storage/domains/channel-identity/base.js';
 export type {
