@@ -168,9 +168,10 @@ export interface MastraFactoryConfig {
    *
    *   eagerSandboxStart: async ctx => (await ctx.getRunRole()) === 'work'
    *
-   * Omitted → sandboxes start lazily on the first command (the default).
+   * `true` boots every session sandbox eagerly. `false` or omitted →
+   * sandboxes start lazily on the first command (the default).
    */
-  eagerSandboxStart?: FactoryEagerSandboxStart;
+  eagerSandboxStart?: boolean | FactoryEagerSandboxStart;
   /** Background Factory dispatcher configuration. */
   dispatcher?: MastraFactoryDispatcherConfig;
   /**

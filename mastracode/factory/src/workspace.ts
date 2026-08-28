@@ -205,8 +205,11 @@ export type FactoryEagerSandboxStart = (context: FactoryEagerSandboxStartContext
 export interface CreateWorkspaceFactoryOptions {
   /** Factory sandbox runtime config (session sandbox callback). */
   sandbox?: MastraFactorySandboxConfig;
-  /** See {@link FactoryEagerSandboxStart}. Omitted → sandboxes start lazily on first command. */
-  eagerSandboxStart?: FactoryEagerSandboxStart;
+  /**
+   * See {@link FactoryEagerSandboxStart}. `true` boots every session sandbox
+   * eagerly; `false` or omitted → sandboxes start lazily on first command.
+   */
+  eagerSandboxStart?: boolean | FactoryEagerSandboxStart;
   /** GitHub integration used to resolve Factory sessions and mint repo tokens. */
   github?: GithubIntegration;
   /** Work-items storage used to resolve the session's run-binding role, so
@@ -256,7 +259,14 @@ export class FactoryWorkspaceRegistry {
 }
 
 export function createWorkspaceFactory(options: CreateWorkspaceFactoryOptions = {}) {
-  const { sandbox: sandboxConfig, github, workItems, eagerSandboxStart } = options;
+  const { sandbox: sandboxConfig, github, workItems } = options;
+  // `true` is shorthand for "every session boots eagerly"; `false` ≡ omitted.
+  const eagerSandboxStart =
+    options.eagerSandboxStart === true
+      ? () => true
+      : typeof options.eagerSandboxStart === 'function'
+        ? options.eagerSandboxStart
+        : undefined;
   const workspaceRegistry = options.workspaceRegistry ?? new FactoryWorkspaceRegistry();
   type GithubTokenRegistration = {
     inject: (token: string) => void;

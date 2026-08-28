@@ -1785,7 +1785,7 @@ describe('GitHub session workspace preparation', () => {
   });
 
   describe('eager sandbox start', () => {
-    async function createEagerFactory(eagerSandboxStart?: (ctx: any) => boolean | Promise<boolean>) {
+    async function createEagerFactory(eagerSandboxStart?: boolean | ((ctx: any) => boolean | Promise<boolean>)) {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mastracode-web-eager-start-'));
       tempDirs.push(root);
       mocks.localRoot = root;
@@ -1793,7 +1793,7 @@ describe('GitHub session workspace preparation', () => {
         sandbox: mocks.createSandbox as any,
         github: fakeGithubIntegration() as any,
         workItems: { findRunBindingBySession: mocks.findRunBindingBySession } as any,
-        ...(eagerSandboxStart ? { eagerSandboxStart } : {}),
+        ...(eagerSandboxStart !== undefined ? { eagerSandboxStart } : {}),
       });
     }
 
@@ -1835,6 +1835,27 @@ describe('GitHub session workspace preparation', () => {
 
     it('leaves the sandbox lazy when no policy is configured', async () => {
       const resolver = await createEagerFactory();
+      addProject();
+      addSession({ id: 'session-1' });
+
+      await resolver({ requestContext: createGithubRequestContext('project-1', 'session-1') });
+      await settle();
+
+      expect(constructedSandbox().start).not.toHaveBeenCalled();
+    });
+
+    it('accepts `true` as shorthand for booting every session eagerly', async () => {
+      const resolver = await createEagerFactory(true);
+      addProject();
+      addSession({ id: 'session-1' });
+
+      await resolver({ requestContext: createGithubRequestContext('project-1', 'session-1') });
+
+      await vi.waitFor(() => expect(constructedSandbox().start).toHaveBeenCalledTimes(1));
+    });
+
+    it('treats `false` the same as no policy', async () => {
+      const resolver = await createEagerFactory(false);
       addProject();
       addSession({ id: 'session-1' });
 

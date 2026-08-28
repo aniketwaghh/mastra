@@ -11,4 +11,4 @@ new MastraFactory({
 });
 ```
 
-The prefetch is fire-and-forget: a failed eager start is logged and the session falls back to the normal lazy start on its first command. Omitting the option keeps today's fully lazy behavior.
+Passing `true` boots every session sandbox eagerly. The prefetch is fire-and-forget: a failed eager start is logged and the session falls back to the normal lazy start on its first command. Omitting the option (or passing `false`) keeps today's fully lazy behavior.
