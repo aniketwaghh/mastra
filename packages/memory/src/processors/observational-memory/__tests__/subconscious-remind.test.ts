@@ -1065,6 +1065,39 @@ describe('Subconscious remind ask conversation', () => {
     }
   });
 
+  it('bounds reminder question routing acceptance by the request deadline', async () => {
+    vi.useFakeTimers();
+    const { tools, generateSpy, registry } = createAskTool();
+    generateSpy.mockReturnValue({ accepted: new Promise(() => {}) } as any);
+    try {
+      const pending = tools.ask_memory.execute!({ question: 'what happened?' } as any, askContext());
+      await vi.advanceTimersByTimeAsync(REMINDER_TURN_DEADLINE_MS);
+      await expect(pending).resolves.toMatchObject({ ok: false, status: 'timed_out' });
+    } finally {
+      generateSpy.mockRestore();
+      registry.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not dispatch an already-aborted reminder question', async () => {
+    const { tools, generateSpy, registry } = createAskTool();
+    const controller = new AbortController();
+    controller.abort();
+    try {
+      await expect(
+        tools.ask_memory.execute!(
+          { question: 'what happened?' } as any,
+          askContext({ abortSignal: controller.signal }),
+        ),
+      ).resolves.toMatchObject({ ok: false, status: 'delivery_failed' });
+      expect(generateSpy).not.toHaveBeenCalled();
+    } finally {
+      generateSpy.mockRestore();
+      registry.dispose();
+    }
+  });
+
   it('accepts a question when the observational memory model is the default sentinel', async () => {
     const { tools, generateSpy } = createAskTool({ omModel: 'default', response: 'Answered on the default model.' });
     try {
