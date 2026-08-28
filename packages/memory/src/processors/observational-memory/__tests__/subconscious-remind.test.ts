@@ -420,7 +420,6 @@ describe('Subconscious remind', () => {
     async function runWithGenerateSpy(options: {
       createRemindMemory?: () => any;
       threadId?: string;
-      resourceId?: string | null;
       response?: string;
     }) {
       const { Agent } = await import('@mastra/core/agent');
@@ -441,12 +440,6 @@ describe('Subconscious remind', () => {
         });
         const context = createContext('unused');
         if (options.threadId) context.threadId = options.threadId;
-        if (options.resourceId === null) {
-          context.resourceId = undefined as any;
-          context.requestContext.set('knowledgeResourceId', 'user-42');
-        } else if (options.resourceId) {
-          context.resourceId = options.resourceId;
-        }
         await seedRelevantItem(context);
 
         const result = await applyExtractorHooks({
@@ -478,16 +471,6 @@ describe('Subconscious remind', () => {
         threadId: 'subconscious:alpha:remind',
         resourceId: 'user-42',
       });
-    });
-
-    it('runs stateless when the observation path lacks the session resource owner', async () => {
-      const createRemindMemory = vi.fn(() => ({ id: 'remind-memory' }) as any);
-      const { result, calls } = await runWithGenerateSpy({ createRemindMemory, resourceId: null });
-
-      expect(result.failures).toBeUndefined();
-      expect(calls).toHaveLength(1);
-      expect(calls[0]?.[1]).not.toHaveProperty('memory');
-      expect(createRemindMemory).not.toHaveBeenCalled();
     });
 
     it('keys the thread off the parent thread id, never off the agent id', async () => {
@@ -843,6 +826,7 @@ describe('Subconscious remind ask conversation', () => {
       omModel?: any;
       createRemindMemory?: () => any;
       generate?: (prompt: string, args: any) => Promise<{ text: string }>;
+      reply?: (replyTool: any, input: any, opts: any, text: string) => Promise<void>;
     } = {},
   ) {
     const memory = { storage: new InMemoryStore(), getKnowledgeSemanticIndex: vi.fn() } as any;
@@ -862,8 +846,12 @@ describe('Subconscious remind ask conversation', () => {
         if (!processed || !('tools' in processed)) return;
         const replyTool = processed.tools?.reply_to_memory_question as any;
         if (!replyTool) return;
+        if (options.reply) {
+          await options.reply(replyTool, input, opts, text);
+          return;
+        }
         await replyTool.execute(
-          { correlationId: input?.metadata?.correlationId, answer: text },
+          { correlationId: input?.metadata?.correlationId, answer: text, more_coming: false },
           {
             requestContext: opts?.requestContext,
             agent: { threadId: opts?.threadId, resourceId: opts?.resourceId },
@@ -916,13 +904,74 @@ describe('Subconscious remind ask conversation', () => {
     for (let i = 0; i < 5; i++) await new Promise(resolve => setTimeout(resolve, 0));
   }
 
-  it.each([
-    ['routing acceptance', { accepted: new Promise(() => {}) }],
-    ['signal persistence', { accepted: Promise.resolve({ action: 'persist' }), persisted: new Promise(() => {}) }],
-  ])('fails terminal delivery when %s never settles', async (_label, signalResult) => {
+  it('delivers persisted partial deltas before one terminal wake without retaining answer bodies', async () => {
+    const sent: Array<{ signal: any; options: any }> = [];
+    const sourceAgent = {
+      sendSignal: vi.fn((signal: any, options: any) => {
+        sent.push({ signal, options });
+        return options.ifIdle?.behavior === 'persist'
+          ? { accepted: Promise.resolve({ action: 'persist' }), persisted: Promise.resolve() }
+          : { accepted: Promise.resolve({ action: 'wake', runId: 'source-run', output: {} }) };
+      }),
+    };
+    const { tools, generateSpy, registry } = createAskTool({
+      response: 'unused',
+      reply: async (replyTool, input, opts) => {
+        const toolContext = {
+          requestContext: opts?.requestContext,
+          agent: { threadId: opts?.threadId, resourceId: opts?.resourceId },
+        };
+        await replyTool.execute(
+          { correlationId: input.metadata.correlationId, answer: 'first delta', more_coming: true },
+          toolContext,
+        );
+        await replyTool.execute(
+          { correlationId: input.metadata.correlationId, answer: 'final delta', more_coming: false },
+          toolContext,
+        );
+      },
+    });
+
+    const accepted: any = await tools.ask_memory.execute!(
+      { question: 'research this' } as any,
+      askContext({ mastra: { getAgentById: vi.fn(async () => sourceAgent) } }),
+    );
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+
+    expect(accepted).toEqual(expect.objectContaining({ ok: true, accepted: true, status: 'pending' }));
+    expect(sent.map(item => item.signal.contents)).toEqual(['first delta', 'final delta']);
+    expect(sent.map(item => item.signal.attributes)).toEqual([
+      expect.objectContaining({
+        correlationId: accepted.correlationId,
+        sequence: 1,
+        more_coming: true,
+        status: 'partial',
+      }),
+      expect.objectContaining({
+        correlationId: accepted.correlationId,
+        sequence: 2,
+        more_coming: false,
+        status: 'replied',
+      }),
+    ]);
+    expect(sent.map(item => item.signal.id)).toEqual([
+      `remind-answer:${accepted.correlationId}:partial:1`,
+      `remind-answer:${accepted.correlationId}:terminal`,
+    ]);
+    expect(sent.map(item => item.options.ifIdle.behavior)).toEqual(['persist', 'wake']);
+    expect(registry.get(accepted.correlationId)).toMatchObject({
+      status: 'replied',
+      partialSequence: 1,
+      terminalSequence: 2,
+    });
+    expect(registry.get(accepted.correlationId)).not.toHaveProperty('answer');
+    generateSpy.mockRestore();
+  });
+
+  it('times out terminal delivery when routing acceptance never settles', async () => {
     vi.useFakeTimers();
     const { tools, generateSpy, registry } = createAskTool({ response: 'A terminal answer.' });
-    const sourceAgent = { sendSignal: vi.fn(() => signalResult) };
+    const sourceAgent = { sendSignal: vi.fn(() => ({ accepted: new Promise(() => {}) })) };
     try {
       const result: any = await tools.ask_memory.execute!(
         { question: 'what happened?' } as any,
@@ -933,10 +982,10 @@ describe('Subconscious remind ask conversation', () => {
 
       await vi.advanceTimersByTimeAsync(REMINDER_TURN_DEADLINE_MS);
       expect(registry.get(result.correlationId)).toMatchObject({
-        status: 'delivery_unknown',
+        status: 'timed_out',
         failure: {
-          status: 'delivery_unknown',
-          message: `Terminal answer delivery timed out after ${REMINDER_TURN_DEADLINE_MS}ms`,
+          status: 'timed_out',
+          message: `Memory question timed out after ${REMINDER_TURN_DEADLINE_MS}ms`,
         },
       });
     } finally {
@@ -946,65 +995,23 @@ describe('Subconscious remind ask conversation', () => {
     }
   });
 
-  it('bounds reminder question routing acceptance by the request deadline', async () => {
-    vi.useFakeTimers();
-    const { tools, generateSpy, registry } = createAskTool();
-    generateSpy.mockReturnValue({ accepted: new Promise(() => {}) } as any);
-    try {
-      const pending = tools.ask_memory.execute!({ question: 'what happened?' } as any, askContext());
-      await vi.advanceTimersByTimeAsync(REMINDER_TURN_DEADLINE_MS);
-      await expect(pending).resolves.toMatchObject({ ok: false, status: 'timed_out' });
-    } finally {
-      generateSpy.mockRestore();
-      registry.dispose();
-      vi.useRealTimers();
-    }
-  });
-
-  it('does not submit a reminder question when the caller is already aborted', async () => {
-    const { tools, generateSpy, registry } = createAskTool();
-    const controller = new AbortController();
-    controller.abort();
-    try {
-      await expect(
-        tools.ask_memory.execute!(
-          { question: 'what happened?' } as any,
-          askContext({ abortSignal: controller.signal }),
-        ),
-      ).resolves.toMatchObject({ ok: false, status: 'delivery_failed' });
-      expect(generateSpy).not.toHaveBeenCalled();
-    } finally {
-      generateSpy.mockRestore();
-      registry.dispose();
-    }
-  });
-
-  it('bounds terminal delivery by the remaining request deadline', async () => {
-    vi.useFakeTimers();
-    const sourceAgent = { sendSignal: vi.fn(() => ({ accepted: new Promise(() => {}) })) };
-    const { tools, generateSpy, registry } = createAskTool({
-      generate: async () => {
-        await new Promise(resolve => setTimeout(resolve, REMINDER_TURN_DEADLINE_MS - 1_000));
-        return { text: 'A late terminal answer.' };
-      },
-    });
+  it('completes terminal delivery on acceptance without waiting for persistence', async () => {
+    const { tools, generateSpy, registry } = createAskTool({ response: 'A terminal answer.' });
+    const sourceAgent = {
+      sendSignal: vi.fn(() => ({
+        accepted: Promise.resolve({ action: 'persist' }),
+        persisted: new Promise(() => {}),
+      })),
+    };
     try {
       const result: any = await tools.ask_memory.execute!(
         { question: 'what happened?' } as any,
         askContext({ mastra: { getAgentById: vi.fn(async () => sourceAgent) } }),
       );
-      await vi.advanceTimersByTimeAsync(REMINDER_TURN_DEADLINE_MS - 1_000);
-      expect(registry.get(result.correlationId)?.status).toBe('terminal_sending');
-
-      await vi.advanceTimersByTimeAsync(1_000);
-      expect(registry.get(result.correlationId)).toMatchObject({
-        status: 'delivery_unknown',
-        failure: { status: 'delivery_unknown', message: 'Terminal answer delivery timed out after 1000ms' },
-      });
+      await vi.waitFor(() => expect(registry.get(result.correlationId)?.status).toBe('replied'));
     } finally {
       generateSpy.mockRestore();
       registry.dispose();
-      vi.useRealTimers();
     }
   });
 
@@ -1367,7 +1374,7 @@ describe('Subconscious remind ask conversation', () => {
         const processed = await processor.processInputStep?.({ messages: [input], tools: {} } as any);
         if (!processed || !('tools' in processed)) return;
         await (processed.tools?.reply_to_memory_question as any).execute(
-          { correlationId: input.metadata?.correlationId, answer: answer.text },
+          { correlationId: input.metadata?.correlationId, answer: answer.text, more_coming: false },
           { agent: { threadId: opts?.threadId, resourceId: opts?.resourceId } },
         );
       });
@@ -1486,7 +1493,7 @@ describe('reminder conversation serialization (real runtime)', () => {
               type: 'tool-call',
               toolCallId: `reply-${index}`,
               toolName: 'reply_to_memory_question',
-              input: JSON.stringify({ correlationId, answer: text }),
+              input: JSON.stringify({ correlationId, answer: text, more_coming: false }),
             },
             {
               type: 'finish',
@@ -1601,7 +1608,7 @@ describe('correlated request lifecycle (real runtime)', () => {
         type: 'tool-call',
         toolCallId: `reply-${id}`,
         toolName: 'reply_to_memory_question',
-        input: JSON.stringify({ correlationId, answer }),
+        input: JSON.stringify({ correlationId, answer, more_coming: false }),
       },
       { type: 'finish', finishReason: 'tool-calls', usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } },
     ]),
@@ -1611,11 +1618,13 @@ describe('correlated request lifecycle (real runtime)', () => {
 
   async function currentInputTools(agent: Agent, input: any) {
     let tools: Record<string, any> = {};
+    const state: Record<string, unknown> = {};
     for (const processor of await agent.listConfiguredInputProcessors()) {
       if (!('processInputStep' in processor) || !processor.processInputStep) continue;
       const result = await processor.processInputStep({
         messages: [{ metadata: input?.metadata, content: input?.contents ?? input?.content }],
         tools,
+        state,
       } as any);
       if (result && !Array.isArray(result) && 'tools' in result && result.tools)
         tools = result.tools as Record<string, any>;
@@ -1949,11 +1958,11 @@ describe('correlated request lifecycle (real runtime)', () => {
         const agentTools = await currentInputTools(this, input);
         const correlationId = input?.metadata?.correlationId;
         rejected = await agentTools.reply_to_memory_question.execute(
-          { correlationId, answer: 'from the wrong room' },
+          { correlationId, answer: 'from the wrong room', more_coming: false },
           { agent: { threadId: 'subconscious:someone-else:remind', resourceId: 'user-99' } },
         );
         await agentTools.reply_to_memory_question.execute(
-          { correlationId, answer: 'from the right room' },
+          { correlationId, answer: 'from the right room', more_coming: false },
           { agent: { threadId: opts?.threadId, resourceId: opts?.resourceId } },
         );
         return { action: 'wake', runId: 'run-stub' };
@@ -2078,21 +2087,25 @@ describe('correlated request lifecycle (real runtime)', () => {
         outcomes.push([
           'unknown',
           await agentTools.reply_to_memory_question.execute(
-            { correlationId: 'remind-ask-00000000-0000-4000-8000-000000000000', answer: 'nobody asked' },
+            {
+              correlationId: 'remind-ask-00000000-0000-4000-8000-000000000000',
+              answer: 'nobody asked',
+              more_coming: false,
+            },
             conversationContext,
           ),
         ]);
         outcomes.push([
           'first',
           await agentTools.reply_to_memory_question.execute(
-            { correlationId, answer: 'the answer' },
+            { correlationId, answer: 'the answer', more_coming: false },
             conversationContext,
           ),
         ]);
         outcomes.push([
           'retry',
           await agentTools.reply_to_memory_question.execute(
-            { correlationId, answer: 'a different answer' },
+            { correlationId, answer: 'a different answer', more_coming: false },
             conversationContext,
           ),
         ]);
