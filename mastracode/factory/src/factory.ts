@@ -965,6 +965,7 @@ export class MastraFactory {
         agent: prepared.base.codeAgent,
         controller: prepared.base.controller,
         storage: workItemsStorage,
+        sourceControlStorage,
       });
     }
 
